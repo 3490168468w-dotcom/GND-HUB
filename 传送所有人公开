@@ -1,0 +1,775 @@
+-- ========== JJS 传送系统（无验证版） ==========
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local localPlayer = Players.LocalPlayer
+
+local teleportInterval = 0.001
+
+local isCycling = false
+local cycleConnection = nil
+local currentIndex = 1
+local screenGui = nil
+local mainFrame = nil
+local floatingButton = nil
+local playerListContainer = nil
+local playerScroll = nil
+local savedUIPosition = nil
+local savedUISize = nil
+local savedFloatingPos = nil
+local dragging = false
+local dragStart = nil
+local frameStart = nil
+local resizing = false
+local resizeStart = nil
+local sizeStart = nil
+local floatingDragging = false
+local floatingDragStart = nil
+local floatingStartPos = nil
+
+local enabledPlayers = {}
+local currentPlayers = {}
+local playerButtons = {}
+
+local isUninstalled = false
+local uiVisible = true
+
+-- ========== 传送功能 ==========
+local function getEnabledPlayers()
+    local enabled = {}
+    for _, plr in ipairs(currentPlayers) do
+        if enabledPlayers[plr] then
+            table.insert(enabled, plr)
+        end
+    end
+    return enabled
+end
+
+local function teleportToPlayer(targetPlayer)
+    local char = localPlayer.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    local targetChar = targetPlayer and targetPlayer.Character
+    if targetChar and targetChar:FindFirstChild("HumanoidRootPart") then
+        hrp.CFrame = targetChar.HumanoidRootPart.CFrame
+    end
+end
+
+local function startCycle()
+    if cycleConnection or not isCycling then return end
+    cycleConnection = task.spawn(function()
+        while isCycling and not isUninstalled do
+            local others = getEnabledPlayers()
+            if #others > 0 then
+                if currentIndex > #others then currentIndex = 1 end
+                teleportToPlayer(others[currentIndex])
+                currentIndex = currentIndex + 1
+                if currentIndex > #others then currentIndex = 1 end
+            end
+            task.wait(teleportInterval)
+        end
+    end)
+end
+
+local function stopCycle()
+    if cycleConnection then
+        task.cancel(cycleConnection)
+        cycleConnection = nil
+    end
+    currentIndex = 1
+end
+
+local function updateFloatingButton()
+    if not floatingButton or not floatingButton.Parent then return end
+    local statusText = floatingButton:FindFirstChild("StatusText")
+    if statusText then
+        statusText.Text = isCycling and "传送中" or "已停止"
+        statusText.TextColor3 = isCycling and Color3.fromRGB(100,255,100) or Color3.fromRGB(255,100,100)
+    end
+end
+
+local function updateMainUI()
+    if not mainFrame or not mainFrame.Parent or isUninstalled then return end
+    local statusLabel = mainFrame:FindFirstChild("StatusLabel")
+    local button = mainFrame:FindFirstChild("ToggleButton")
+    if statusLabel and button then
+        local enabledCount = #getEnabledPlayers()
+        statusLabel.Text = string.format("状态: %s | 追踪: %d/%d人", isCycling and "开启 ✓" or "关闭 ✗", enabledCount, #currentPlayers)
+        statusLabel.TextColor3 = isCycling and Color3.fromRGB(100,255,100) or Color3.fromRGB(220,220,220)
+        button.Text = isCycling and "关闭循环" or "开启循环"
+        button.BackgroundColor3 = isCycling and Color3.fromRGB(200,50,50) or Color3.fromRGB(0,120,210)
+    end
+    updateFloatingButton()
+end
+
+local function toggleCycle()
+    if isUninstalled then return end
+    isCycling = not isCycling
+    if isCycling then startCycle() else stopCycle() end
+    updateMainUI()
+end
+
+local function setInterval(value)
+    if isUninstalled then return end
+    local num = tonumber(value)
+    if num then
+        teleportInterval = math.clamp(num, 0.00001, 1)
+        if isCycling then
+            stopCycle()
+            startCycle()
+        end
+    end
+end
+
+local function saveUIPosition()
+    if mainFrame and mainFrame.Parent and not isUninstalled then
+        savedUIPosition = {X = mainFrame.Position.X.Offset, Y = mainFrame.Position.Y.Offset}
+        savedUISize = {Width = mainFrame.Size.X.Offset, Height = mainFrame.Size.Y.Offset}
+    end
+end
+
+local function saveFloatingPosition()
+    if floatingButton and floatingButton.Parent and not isUninstalled then
+        savedFloatingPos = {X = floatingButton.Position.X.Offset, Y = floatingButton.Position.Y.Offset}
+    end
+end
+
+local function toggleUIVisibility()
+    uiVisible = not uiVisible
+    if mainFrame then
+        mainFrame.Visible = uiVisible
+    end
+end
+
+-- ========== 玩家列表UI ==========
+local function togglePlayer(player)
+    if not player then return end
+    enabledPlayers[player] = not enabledPlayers[player]
+    
+    local btn = playerButtons[player]
+    if btn and btn.Parent then
+        if enabledPlayers[player] then
+            btn.BackgroundColor3 = Color3.fromRGB(0, 130, 90)
+            btn.Text = "● " .. player.Name
+        else
+            btn.BackgroundColor3 = Color3.fromRGB(70, 70, 90)
+            btn.Text = "○ " .. player.Name
+        end
+    end
+    
+    if isCycling then
+        local enabled = getEnabledPlayers()
+        if currentIndex > #enabled and #enabled > 0 then
+            currentIndex = 1
+        end
+    end
+    updateMainUI()
+end
+
+local function selectAll()
+    for _, plr in ipairs(currentPlayers) do
+        enabledPlayers[plr] = true
+        local btn = playerButtons[plr]
+        if btn and btn.Parent then
+            btn.BackgroundColor3 = Color3.fromRGB(0, 130, 90)
+            btn.Text = "● " .. plr.Name
+        end
+    end
+    updateMainUI()
+end
+
+local function selectNone()
+    for _, plr in ipairs(currentPlayers) do
+        enabledPlayers[plr] = false
+        local btn = playerButtons[plr]
+        if btn and btn.Parent then
+            btn.BackgroundColor3 = Color3.fromRGB(70, 70, 90)
+            btn.Text = "○ " .. plr.Name
+        end
+    end
+    updateMainUI()
+end
+
+local function rebuildPlayerList()
+    if not playerListContainer or not playerListContainer.Parent then
+        return
+    end
+    
+    for _, child in ipairs(playerListContainer:GetChildren()) do
+        child:Destroy()
+    end
+    playerButtons = {}
+    
+    currentPlayers = {}
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= localPlayer then
+            table.insert(currentPlayers, plr)
+        end
+    end
+    table.sort(currentPlayers, function(a,b) return a.Name < b.Name end)
+    
+    for _, plr in ipairs(currentPlayers) do
+        if enabledPlayers[plr] == nil then
+            enabledPlayers[plr] = true
+        end
+    end
+    
+    for plr, _ in pairs(enabledPlayers) do
+        local exists = false
+        for _, newPlr in ipairs(currentPlayers) do
+            if newPlr == plr then
+                exists = true
+                break
+            end
+        end
+        if not exists then
+            enabledPlayers[plr] = nil
+        end
+    end
+    
+    if #currentPlayers == 0 then
+        local emptyLabel = Instance.new("TextLabel")
+        emptyLabel.Size = UDim2.new(1, -10, 0, 50)
+        emptyLabel.Position = UDim2.new(0, 5, 0, 10)
+        emptyLabel.Text = "暂无其他玩家"
+        emptyLabel.TextColor3 = Color3.fromRGB(150,150,170)
+        emptyLabel.BackgroundTransparency = 1
+        emptyLabel.Font = Enum.Font.Gotham
+        emptyLabel.TextSize = 16
+        emptyLabel.Parent = playerListContainer
+        playerListContainer.Size = UDim2.new(1, 0, 0, 70)
+        
+        if playerScroll then
+            playerScroll.CanvasSize = UDim2.new(0, 0, 0, 70)
+        end
+        updateMainUI()
+        return
+    end
+    
+    local buttonHeight = 38
+    local padding = 4
+    
+    for i, plr in ipairs(currentPlayers) do
+        local isEnabled = enabledPlayers[plr]
+        
+        local playerBtn = Instance.new("TextButton")
+        playerBtn.Size = UDim2.new(1, -10, 0, buttonHeight)
+        playerBtn.Position = UDim2.new(0, 5, 0, (i-1) * (buttonHeight + padding))
+        playerBtn.BackgroundColor3 = isEnabled and Color3.fromRGB(0, 130, 90) or Color3.fromRGB(70, 70, 90)
+        playerBtn.Text = (isEnabled and "● " or "○ ") .. plr.Name
+        playerBtn.TextColor3 = Color3.new(1,1,1)
+        playerBtn.Font = Enum.Font.Gotham
+        playerBtn.TextSize = 16
+        playerBtn.TextXAlignment = Enum.TextXAlignment.Left
+        playerBtn.Parent = playerListContainer
+        
+        local btnCorner = Instance.new("UICorner")
+        btnCorner.CornerRadius = UDim.new(0, 6)
+        btnCorner.Parent = playerBtn
+        
+        local plrRef = plr
+        playerBtn.MouseButton1Click:Connect(function()
+            togglePlayer(plrRef)
+        end)
+        
+        playerButtons[plr] = playerBtn
+    end
+    
+    local totalHeight = #currentPlayers * (buttonHeight + padding) + 10
+    playerListContainer.Size = UDim2.new(1, 0, 0, totalHeight)
+    
+    if playerScroll then
+        playerScroll.CanvasSize = UDim2.new(0, 0, 0, totalHeight)
+    end
+    
+    updateMainUI()
+end
+
+local function refreshPlayerList()
+    if not playerListContainer or not playerListContainer.Parent then
+        return
+    end
+    rebuildPlayerList()
+end
+
+-- ========== 卸载脚本 ==========
+local function uninstallScript()
+    if isUninstalled then return end
+    
+    isCycling = false
+    stopCycle()
+    
+    if screenGui then
+        pcall(function() screenGui:Destroy() end)
+        screenGui = nil
+    end
+    mainFrame = nil
+    floatingButton = nil
+    playerListContainer = nil
+    playerScroll = nil
+    playerButtons = {}
+    
+    isUninstalled = true
+    
+    game.StarterGui:SetCore("SendNotification", {Title = "卸载完成", Text = "脚本已完全卸载", Duration = 2})
+end
+
+local function destroyUI()
+    if screenGui then
+        pcall(function() screenGui:Destroy() end)
+        screenGui = nil
+    end
+    mainFrame = nil
+    floatingButton = nil
+    playerListContainer = nil
+    playerScroll = nil
+    playerButtons = {}
+end
+
+local function relayoutUI()
+    if not mainFrame or not mainFrame.Parent or isUninstalled then return end
+    local currentH = mainFrame.Size.Y.Offset
+    
+    local uninstallBtn = mainFrame:FindFirstChild("UninstallButton")
+    
+    if playerScroll then
+        local listTop = 185
+        local listHeight = currentH - listTop - 50
+        playerScroll.Size = UDim2.new(1, -15, 0, math.max(120, listHeight))
+    end
+    
+    if uninstallBtn then
+        uninstallBtn.Position = UDim2.new(0.5, -45, 0, currentH - 42)
+    end
+end
+
+local function createFloatingButton()
+    local ball = Instance.new("TextButton")
+    ball.Name = "FloatingBall"
+    ball.Size = UDim2.new(0, 55, 0, 55)
+    if savedFloatingPos then
+        ball.Position = UDim2.new(0, savedFloatingPos.X, 0, savedFloatingPos.Y)
+    else
+        ball.Position = UDim2.new(0, 20, 0, 100)
+    end
+    ball.BackgroundColor3 = Color3.fromRGB(30, 30, 45)
+    ball.BackgroundTransparency = 0.15
+    ball.Text = ""
+    ball.Parent = screenGui
+    
+    local ballCorner = Instance.new("UICorner")
+    ballCorner.CornerRadius = UDim.new(1, 0)
+    ballCorner.Parent = ball
+    
+    local statusText = Instance.new("TextLabel")
+    statusText.Name = "StatusText"
+    statusText.Size = UDim2.new(1, 0, 0.6, 0)
+    statusText.Position = UDim2.new(0, 0, 0.2, 0)
+    statusText.Text = "已停止"
+    statusText.TextColor3 = Color3.fromRGB(255,100,100)
+    statusText.BackgroundTransparency = 1
+    statusText.Font = Enum.Font.GothamBold
+    statusText.TextSize = 12
+    statusText.Parent = ball
+    
+    local modeText = Instance.new("TextLabel")
+    modeText.Name = "ModeText"
+    modeText.Size = UDim2.new(1, 0, 0.4, 0)
+    modeText.Position = UDim2.new(0, 0, 0.6, 0)
+    modeText.Text = "传送"
+    modeText.TextColor3 = Color3.fromRGB(180,180,220)
+    modeText.BackgroundTransparency = 1
+    modeText.Font = Enum.Font.Gotham
+    modeText.TextSize = 10
+    modeText.Parent = ball
+    
+    ball.MouseButton1Click:Connect(toggleUIVisibility)
+    
+    ball.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            floatingDragging = true
+            floatingDragStart = UserInputService:GetMouseLocation()
+            floatingStartPos = ball.Position
+        end
+    end)
+    
+    ball.InputEnded:Connect(function()
+        floatingDragging = false
+        saveFloatingPosition()
+    end)
+    
+    return ball
+end
+
+local function createMainUI()
+    if isUninstalled then return end
+    
+    destroyUI()
+    
+    screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "CyclingUI"
+    screenGui.ResetOnSpawn = false
+    screenGui.Parent = localPlayer:WaitForChild("PlayerGui")
+    
+    floatingButton = createFloatingButton()
+    
+    mainFrame = Instance.new("Frame")
+    mainFrame.Name = "MainFrame"
+    local defaultW, defaultH = 320, 520
+    if savedUISize and savedUISize.Width > 150 and savedUISize.Height > 300 then
+        mainFrame.Size = UDim2.new(0, savedUISize.Width, 0, savedUISize.Height)
+    else
+        mainFrame.Size = UDim2.new(0, defaultW, 0, defaultH)
+    end
+    mainFrame.Position = savedUIPosition and UDim2.new(0, savedUIPosition.X, 0, savedUIPosition.Y) or UDim2.new(0.5, -defaultW/2, 0.5, -defaultH/2)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(35,35,45)
+    mainFrame.BackgroundTransparency = 0.1
+    mainFrame.Parent = screenGui
+    mainFrame.Visible = uiVisible
+    
+    local mainCorner = Instance.new("UICorner")
+    mainCorner.CornerRadius = UDim.new(0, 12)
+    mainCorner.Parent = mainFrame
+    
+    local titleBar = Instance.new("TextLabel")
+    titleBar.Name = "TitleBar"
+    titleBar.Size = UDim2.new(1, 0, 0, 35)
+    titleBar.Text = "  ⋮⋮  传送追踪器 - 点击名字切换  ⋮⋮"
+    titleBar.TextColor3 = Color3.new(1,1,1)
+    titleBar.BackgroundColor3 = Color3.fromRGB(50,50,65)
+    titleBar.BackgroundTransparency = 0.3
+    titleBar.Font = Enum.Font.GothamBold
+    titleBar.TextSize = 13
+    titleBar.Parent = mainFrame
+    Instance.new("UICorner").CornerRadius = UDim.new(0, 12)
+    Instance.new("UICorner").Parent = titleBar
+    
+    local statusLabel = Instance.new("TextLabel")
+    statusLabel.Name = "StatusLabel"
+    statusLabel.Size = UDim2.new(1, -20, 0, 35)
+    statusLabel.Position = UDim2.new(0, 10, 0, 45)
+    statusLabel.Text = "状态: 关闭 | 追踪: 0/0人"
+    statusLabel.TextColor3 = Color3.fromRGB(220,220,220)
+    statusLabel.BackgroundTransparency = 1
+    statusLabel.Font = Enum.Font.Gotham
+    statusLabel.TextSize = 14
+    statusLabel.Parent = mainFrame
+    
+    local intervalLabel = Instance.new("TextLabel")
+    intervalLabel.Name = "IntervalLabel"
+    intervalLabel.Size = UDim2.new(0.45, -10, 0, 28)
+    intervalLabel.Position = UDim2.new(0, 10, 0, 90)
+    intervalLabel.Text = "传送间隔(秒):"
+    intervalLabel.TextColor3 = Color3.fromRGB(200,200,200)
+    intervalLabel.BackgroundTransparency = 1
+    intervalLabel.Font = Enum.Font.Gotham
+    intervalLabel.TextSize = 12
+    intervalLabel.Parent = mainFrame
+    
+    local intervalBox = Instance.new("TextBox")
+    intervalBox.Name = "IntervalBox"
+    intervalBox.Size = UDim2.new(0.4, -10, 0, 30)
+    intervalBox.Position = UDim2.new(0.5, 5, 0, 89)
+    intervalBox.PlaceholderText = "0.00001 ~ 1"
+    intervalBox.Text = tostring(teleportInterval)
+    intervalBox.TextColor3 = Color3.new(1,1,1)
+    intervalBox.BackgroundColor3 = Color3.fromRGB(50,50,65)
+    intervalBox.Parent = mainFrame
+    Instance.new("UICorner").CornerRadius = UDim.new(0, 6)
+    Instance.new("UICorner").Parent = intervalBox
+    intervalBox.FocusLost:Connect(function() setInterval(intervalBox.Text) end)
+    
+    local toggleBtn = Instance.new("TextButton")
+    toggleBtn.Name = "ToggleButton"
+    toggleBtn.Size = UDim2.new(0, 130, 0, 40)
+    toggleBtn.Position = UDim2.new(0.5, -65, 0, 130)
+    toggleBtn.Text = "开启循环"
+    toggleBtn.TextColor3 = Color3.new(1,1,1)
+    toggleBtn.BackgroundColor3 = Color3.fromRGB(0,120,210)
+    toggleBtn.Font = Enum.Font.GothamBold
+    toggleBtn.TextSize = 16
+    toggleBtn.Parent = mainFrame
+    Instance.new("UICorner").CornerRadius = UDim.new(0, 8)
+    Instance.new("UICorner").Parent = toggleBtn
+    toggleBtn.MouseButton1Click:Connect(toggleCycle)
+    
+    local actionBar = Instance.new("Frame")
+    actionBar.Name = "ActionBar"
+    actionBar.Size = UDim2.new(1, -15, 0, 35)
+    actionBar.Position = UDim2.new(0, 8, 0, 180)
+    actionBar.BackgroundTransparency = 1
+    actionBar.Parent = mainFrame
+    
+    local selectAllBtn = Instance.new("TextButton")
+    selectAllBtn.Size = UDim2.new(0.48, -5, 1, -5)
+    selectAllBtn.Position = UDim2.new(0, 0, 0, 0)
+    selectAllBtn.Text = "✓ 全选"
+    selectAllBtn.TextColor3 = Color3.new(1,1,1)
+    selectAllBtn.BackgroundColor3 = Color3.fromRGB(0, 100, 140)
+    selectAllBtn.Font = Enum.Font.GothamBold
+    selectAllBtn.TextSize = 14
+    selectAllBtn.Parent = actionBar
+    Instance.new("UICorner").CornerRadius = UDim.new(0, 6)
+    Instance.new("UICorner").Parent = selectAllBtn
+    selectAllBtn.MouseButton1Click:Connect(selectAll)
+    
+    local selectNoneBtn = Instance.new("TextButton")
+    selectNoneBtn.Size = UDim2.new(0.48, -5, 1, -5)
+    selectNoneBtn.Position = UDim2.new(0.52, 0, 0, 0)
+    selectNoneBtn.Text = "✗ 全部取消"
+    selectNoneBtn.TextColor3 = Color3.new(1,1,1)
+    selectNoneBtn.BackgroundColor3 = Color3.fromRGB(120, 60, 60)
+    selectNoneBtn.Font = Enum.Font.GothamBold
+    selectNoneBtn.TextSize = 14
+    selectNoneBtn.Parent = actionBar
+    Instance.new("UICorner").CornerRadius = UDim.new(0, 6)
+    Instance.new("UICorner").Parent = selectNoneBtn
+    selectNoneBtn.MouseButton1Click:Connect(selectNone)
+    
+    playerScroll = Instance.new("ScrollingFrame")
+    playerScroll.Name = "PlayerScrollFrame"
+    playerScroll.Size = UDim2.new(1, -15, 0, 230)
+    playerScroll.Position = UDim2.new(0, 8, 0, 220)
+    playerScroll.BackgroundColor3 = Color3.fromRGB(25,25,35)
+    playerScroll.BackgroundTransparency = 0.3
+    playerScroll.Parent = mainFrame
+    playerScroll.ScrollBarThickness = 5
+    playerScroll.ScrollBarImageColor3 = Color3.fromRGB(100,100,120)
+    Instance.new("UICorner").CornerRadius = UDim.new(0, 8)
+    Instance.new("UICorner").Parent = playerScroll
+    
+    playerListContainer = Instance.new("Frame")
+    playerListContainer.Name = "PlayerListContainer"
+    playerListContainer.Size = UDim2.new(1, 0, 0, 0)
+    playerListContainer.BackgroundTransparency = 1
+    playerListContainer.Parent = playerScroll
+    
+    local uninstallBtn = Instance.new("TextButton")
+    uninstallBtn.Name = "UninstallButton"
+    uninstallBtn.Size = UDim2.new(0, 90, 0, 32)
+    uninstallBtn.Position = UDim2.new(0.5, -45, 0, mainFrame.Size.Y.Offset - 42)
+    uninstallBtn.Text = "🗑 卸载"
+    uninstallBtn.TextColor3 = Color3.new(1,1,1)
+    uninstallBtn.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+    uninstallBtn.Font = Enum.Font.GothamBold
+    uninstallBtn.TextSize = 13
+    uninstallBtn.Parent = mainFrame
+    Instance.new("UICorner").CornerRadius = UDim.new(0, 8)
+    Instance.new("UICorner").Parent = uninstallBtn
+    
+    uninstallBtn.MouseButton1Click:Connect(function()
+        local confirmGui = Instance.new("ScreenGui")
+        confirmGui.Name = "ConfirmDialog"
+        confirmGui.Parent = localPlayer:WaitForChild("PlayerGui")
+        
+        local confirmFrame = Instance.new("Frame")
+        confirmFrame.Size = UDim2.new(0, 250, 0, 120)
+        confirmFrame.Position = UDim2.new(0.5, -125, 0.5, -60)
+        confirmFrame.BackgroundColor3 = Color3.fromRGB(40,40,50)
+        confirmFrame.BackgroundTransparency = 0.1
+        confirmFrame.Parent = confirmGui
+        Instance.new("UICorner").CornerRadius = UDim.new(0, 10)
+        Instance.new("UICorner").Parent = confirmFrame
+        
+        local confirmText = Instance.new("TextLabel")
+        confirmText.Size = UDim2.new(1, -20, 0, 40)
+        confirmText.Position = UDim2.new(0, 10, 0, 15)
+        confirmText.Text = "确定要卸载脚本吗？"
+        confirmText.TextColor3 = Color3.new(1,1,1)
+        confirmText.BackgroundTransparency = 1
+        confirmText.Font = Enum.Font.Gotham
+        confirmText.TextSize = 14
+        confirmText.Parent = confirmFrame
+        
+        local yesBtn = Instance.new("TextButton")
+        yesBtn.Size = UDim2.new(0, 90, 0, 35)
+        yesBtn.Position = UDim2.new(0, 20, 0, 70)
+        yesBtn.Text = "确认"
+        yesBtn.TextColor3 = Color3.new(1,1,1)
+        yesBtn.BackgroundColor3 = Color3.fromRGB(200,50,50)
+        yesBtn.Font = Enum.Font.GothamBold
+        yesBtn.TextSize = 14
+        yesBtn.Parent = confirmFrame
+        Instance.new("UICorner").CornerRadius = UDim.new(0, 6)
+        Instance.new("UICorner").Parent = yesBtn
+        
+        local noBtn = Instance.new("TextButton")
+        noBtn.Size = UDim2.new(0, 90, 0, 35)
+        noBtn.Position = UDim2.new(1, -110, 0, 70)
+        noBtn.Text = "取消"
+        noBtn.TextColor3 = Color3.new(1,1,1)
+        noBtn.BackgroundColor3 = Color3.fromRGB(80,80,100)
+        noBtn.Font = Enum.Font.GothamBold
+        noBtn.TextSize = 14
+        noBtn.Parent = confirmFrame
+        Instance.new("UICorner").CornerRadius = UDim.new(0, 6)
+        Instance.new("UICorner").Parent = noBtn
+        
+        yesBtn.MouseButton1Click:Connect(function()
+            confirmGui:Destroy()
+            uninstallScript()
+        end)
+        noBtn.MouseButton1Click:Connect(function()
+            confirmGui:Destroy()
+        end)
+    end)
+    
+    local resizeHandle = Instance.new("TextButton")
+    resizeHandle.Name = "ResizeHandle"
+    resizeHandle.Size = UDim2.new(0, 20, 0, 20)
+    resizeHandle.Position = UDim2.new(1, -20, 1, -20)
+    resizeHandle.Text = "◢"
+    resizeHandle.TextColor3 = Color3.fromRGB(180,180,180)
+    resizeHandle.BackgroundColor3 = Color3.fromRGB(60,60,75)
+    resizeHandle.BackgroundTransparency = 0.5
+    resizeHandle.Font = Enum.Font.Gotham
+    resizeHandle.TextSize = 14
+    resizeHandle.Parent = mainFrame
+    Instance.new("UICorner").CornerRadius = UDim.new(0, 6)
+    Instance.new("UICorner").Parent = resizeHandle
+    
+    resizeHandle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            resizing = true
+            resizeStart = UserInputService:GetMouseLocation()
+            sizeStart = {Width = mainFrame.Size.X.Offset, Height = mainFrame.Size.Y.Offset}
+        end
+    end)
+    resizeHandle.InputEnded:Connect(function()
+        resizing = false
+        saveUIPosition()
+    end)
+    
+    titleBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            dragStart = UserInputService:GetMouseLocation()
+            frameStart = mainFrame.Position
+        end
+    end)
+    titleBar.InputEnded:Connect(function()
+        dragging = false
+        saveUIPosition()
+    end)
+    
+    task.wait(0.15)
+    rebuildPlayerList()
+    relayoutUI()
+    updateMainUI()
+end
+
+-- ========== 全局监听 ==========
+UserInputService.InputChanged:Connect(function(input)
+    if isUninstalled then return end
+    
+    if dragging and mainFrame and mainFrame.Parent then
+        if input.UserInputType == Enum.UserInputType.MouseMovement then
+            local currentPos = UserInputService:GetMouseLocation()
+            local delta = currentPos - dragStart
+            local newX = frameStart.X.Offset + delta.X
+            local newY = frameStart.Y.Offset + delta.Y
+            local screenSize = workspace.CurrentCamera.ViewportSize
+            mainFrame.Position = UDim2.new(0, math.clamp(newX, 0, screenSize.X - mainFrame.AbsoluteSize.X), 0, math.clamp(newY, 0, screenSize.Y - mainFrame.AbsoluteSize.Y))
+        end
+    end
+    
+    if resizing and mainFrame and mainFrame.Parent and resizeStart and sizeStart then
+        if input.UserInputType == Enum.UserInputType.MouseMovement then
+            local currentPos = UserInputService:GetMouseLocation()
+            local delta = currentPos - resizeStart
+            local newW = math.clamp(sizeStart.Width + delta.X, 300, 600)
+            local newH = math.clamp(sizeStart.Height + delta.Y, 400, 700)
+            local framePos = mainFrame.Position
+            local screenSize = workspace.CurrentCamera.ViewportSize
+            if framePos.X.Offset + newW > screenSize.X then
+                newW = screenSize.X - framePos.X.Offset
+            end
+            if framePos.Y.Offset + newH > screenSize.Y then
+                newH = screenSize.Y - framePos.Y.Offset
+            end
+            mainFrame.Size = UDim2.new(0, newW, 0, newH)
+            relayoutUI()
+        end
+    end
+    
+    if floatingDragging and floatingButton and floatingButton.Parent then
+        if input.UserInputType == Enum.UserInputType.MouseMovement then
+            local currentPos = UserInputService:GetMouseLocation()
+            local delta = currentPos - floatingDragStart
+            local newX = floatingStartPos.X.Offset + delta.X
+            local newY = floatingStartPos.Y.Offset + delta.Y
+            local screenSize = workspace.CurrentCamera.ViewportSize
+            floatingButton.Position = UDim2.new(0, math.clamp(newX, 0, screenSize.X - 55), 0, math.clamp(newY, 0, screenSize.Y - 55))
+        end
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        if resizing then
+            resizing = false
+            saveUIPosition()
+        end
+        if dragging then
+            dragging = false
+            saveUIPosition()
+        end
+        if floatingDragging then
+            floatingDragging = false
+            saveFloatingPosition()
+        end
+    end
+end)
+
+-- ========== 玩家事件 ==========
+Players.PlayerAdded:Connect(function(player)
+    if isUninstalled then return end
+    if player ~= localPlayer then
+        task.wait(0.1)
+        refreshPlayerList()
+    end
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+    if isUninstalled then return end
+    if player ~= localPlayer then
+        refreshPlayerList()
+    end
+end)
+
+-- ========== 死亡重生 ==========
+localPlayer.CharacterAdded:Connect(function()
+    if isUninstalled then return end
+    
+    task.wait(0.8)
+    
+    if not screenGui or not screenGui.Parent then
+        createMainUI()
+    elseif playerListContainer and playerListContainer.Parent then
+        refreshPlayerList()
+    else
+        createMainUI()
+    end
+    
+    if isCycling then
+        stopCycle()
+        startCycle()
+    end
+end)
+
+-- ========== 定期检查 ==========
+task.spawn(function()
+    while not isUninstalled do
+        task.wait(5)
+        if not isUninstalled then
+            if not screenGui or not screenGui.Parent then
+                createMainUI()
+            elseif playerListContainer and playerListContainer.Parent then
+                refreshPlayerList()
+            end
+        end
+    end
+end)
+
+-- ========== 启动 ==========
+createMainUI()
