@@ -92,7 +92,7 @@ local function updateMainUI()
     local button = mainFrame:FindFirstChild("ToggleButton")
     if statusLabel and button then
         local enabledCount = #getEnabledPlayers()
-        statusLabel.Text = string.format("状态: %s | 追踪: %d/%d人", isCycling and "开启 ✓" or "关闭 ✗", enabledCount, #currentPlayers)
+        statusLabel.Text = string.format("状态:%s  | 追踪: %d/%d人", isCycling and "开启 ✓" or "关闭 ✗", enabledCount, #currentPlayers)
         statusLabel.TextColor3 = isCycling and Color3.fromRGB(100,255,100) or Color3.fromRGB(220,220,220)
         button.Text = isCycling and "关闭循环" or "开启循环"
         button.BackgroundColor3 = isCycling and Color3.fromRGB(200,50,50) or Color3.fromRGB(0,120,210)
